@@ -3,10 +3,11 @@ require 'uri'
 require 'net/http'
 require 'net/https'
 require 'timeout'
+require 'json'
 
 # Validates accounts against a remote Devise installation using its JSON API.
 #
-# Config example:
+# For example:
 #
 #   authenticator:
 #     class: CASServer::Authenticators::RemoteDevise
@@ -28,8 +29,8 @@ require 'timeout'
 #   timeout -- Number of seconds to wait for response from Devise. Defaults to 10 seconds.
 #
 # All user account attributes returned by API on successful auth are available as extra attributes.
-# To avoid conflicts, if a 'username' attribute is provided to the extra attributes, it will be renamed to
-# 'username_devise'.
+# To avoid conflicts, if a :username attribute is provided to the extra attributes, it will be renamed to
+# :username_devise.
 class CASServer::Authenticators::RemoteDevise < CASServer::Authenticators::Base
   def self.setup(options)
     raise CASServer::AuthenticatorError, "No Devise URL provided" unless options[:url]
@@ -45,8 +46,10 @@ class CASServer::Authenticators::RemoteDevise < CASServer::Authenticators::Base
     return false if @username.blank? || @password.blank?
 
     auth_data = {
-      "#{@options[:devise][:model]}[#{@options[:devise][:attribute]}]"  => @username,
-      "#{@options[:devise][:model]}[password]"                          => @password,
+      "#{@options[:devise][:model]}" => {      
+        "#{@options[:devise][:attribute]}" => @username,
+        "password"                         => @password,
+      },
     }
 
     url = URI.parse(@options[:url])
@@ -63,7 +66,9 @@ class CASServer::Authenticators::RemoteDevise < CASServer::Authenticators::Base
         begin
           res = http.start do |conn|
             req = Net::HTTP::Post.new(url.path)
-            req.set_form_data(auth_data,'&')
+            req.body = JSON.generate(auth_data)
+            req['Accept'] = 'application/json'
+            req['Content-Type'] = 'application/json'
             conn.request(req)
           end
         rescue StandardError => e
@@ -71,6 +76,10 @@ class CASServer::Authenticators::RemoteDevise < CASServer::Authenticators::Base
         end
 
         case res
+        when Net::HTTPNotAcceptable
+          $LOG.error("Devise said it couldn't return JSON (HTTP error 406). This could also be a problem with CSRF being enabled.")
+          raise CASServer::AuthenticatorError, "Login server currently unavailable. (Could not supply requested data format)"
+
         when Net::HTTPSuccess, Net::HTTPUnauthorized
 
           content_type = res['content-type'].split(';')[0]
@@ -101,7 +110,7 @@ class CASServer::Authenticators::RemoteDevise < CASServer::Authenticators::Base
 
         when Net::HTTPInternalServerError
           $LOG.error("Devise throws Internal Server Error while validating credentials: #{res.inspect} ==> #{res.body}.")
-          raise CASServer::AuthenticatorError, "Login server currently unavailable. (Internal Server Error received while validating credentials)"
+          raise CASServer::AuthenticatorError, "Login server currently unavailable. (Internal Server Error recieved while validating credentials)"
 
         else
           $LOG.error("Unexpected response code from Devise while validating credentials: #{res.inspect} ==> #{res.body}.")
